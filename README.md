@@ -160,7 +160,7 @@ GEMINI_API_KEY=tu_clave_api_aqui
 
 ### 4. Ejecutar la aplicación
 ```bash
-streamlit run app.py
+streamlit run run.py
 ```
 
 ---
