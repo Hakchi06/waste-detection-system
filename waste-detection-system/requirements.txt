@@ -3,7 +3,7 @@ ultralytics>=8.0
 pillow
 pandas
 plotly
-opencv-python
+opencv-python-headless
 altair>=4.0
 streamlit-folium
 requests

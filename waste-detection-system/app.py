@@ -6,6 +6,10 @@ import pandas as pd
 from datetime import datetime, timedelta
 import requests
 import json
+import os
+os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+os.environ['SDL_VIDEODRIVER'] = 'dummy'
+os.environ['OPENCV_VIDEOIO_PRIORITY_MSMF'] = '0'
 from utils.config import CSV_REGISTROS
 from utils.helpers import asegurar_archivo_registros, calcular_impacto_ambiental, obtener_centros_reciclaje_panama
 from utils.detection import ejecutar_deteccion_analisis_gemini
