@@ -4,3 +4,8 @@ pillow
 pandas
 plotly
 opencv-python-headless
+altair>=4.0
+streamlit-folium
+requests
+folium
+python-dotenv

@@ -1,176 +1,377 @@
 import streamlit as st
-from ultralytics import YOLO
 from PIL import Image
-import numpy as np
+import folium
+from streamlit_folium import st_folium
 import pandas as pd
+from datetime import datetime, timedelta
+import requests
 import json
-from utils.helpers import append_record, ensure_records_file
-from pathlib import Path
-import plotly.express as px
+from utils.config import CSV_REGISTROS
+from utils.helpers import asegurar_archivo_registros, calcular_impacto_ambiental, obtener_centros_reciclaje_panama
+from utils.detection import ejecutar_deteccion_analisis_gemini
+from utils.dashboard import mostrar_dashboard
 
-# ===============================
-# CONFIGURATION
-# ===============================
-BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = BASE_DIR / "models" / "best-classify.pt"
-CATEGORIES_JSON = BASE_DIR / "data" / "categories.json"
-RECORDS_CSV = BASE_DIR / "data" / "records.csv"
+# Asegurar que el archivo de registros exista
+asegurar_archivo_registros(CSV_REGISTROS)
 
-ensure_records_file(RECORDS_CSV)
+# Configuración de página mejorada
+st.set_page_config(
+    page_title='Sistema de Gestión de Residuos',
+    layout='wide',
+    initial_sidebar_state='expanded'
+)
 
-@st.cache_resource
-def load_model(path):
-    return YOLO(str(path))
+# Estilos CSS personalizados para mejor apariencia
+st.markdown("""
+<style>
+    .main-header {
+        background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
+        color: white;
+        padding: 2rem;
+        border-radius: 10px;
+        margin-bottom: 2rem;
+        text-align: center;
+    }
+    .metric-card {
+        background: #f8fafc;
+        padding: 1rem;
+        border-radius: 8px;
+        border-left: 4px solid #3b82f6;
+        margin: 0.5rem 0;
+    }
+    .alert-card {
+        background: #fef2f2;
+        border: 1px solid #fecaca;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 1rem 0;
+    }
+    .success-card {
+        background: #f0fdf4;
+        border: 1px solid #bbf7d0;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 1rem 0;
+    }
+    .stButton>button {
+        background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        padding: 0.5rem 1rem;
+        font-weight: 500;
+    }
+    .stButton>button:hover {
+        background: linear-gradient(135deg, #1d4ed8 0%, #2563eb 100%);
+        transform: translateY(-1px);
+    }
+</style>
+""", unsafe_allow_html=True)
 
-model = load_model(MODEL_PATH)
+# Función para obtener ubicación actual
+def obtener_ubicacion_actual():
+    try:
+        response = requests.get('http://ip-api.com/json/', timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return f"{data.get('lat', 8.98)}, {data.get('lon', -79.52)}"
+    except:
+        pass
+    return "8.98, -79.52"
 
-st.set_page_config(page_title='Clasificador de Desechos', layout='wide')
-st.title('Clasificación de Desechos del Hogar')
 
-# ===============================
-# LOAD CATEGORY INFORMATION
-# ===============================
-with open(CATEGORIES_JSON, "r", encoding="utf-8") as f:
-    categories = json.load(f)
+# Función para mostrar mapa interactivo
+def mostrar_mapa_residuos(df_filtrado):
+    if df_filtrado.empty:
+        st.info("No hay datos para mostrar en el mapa")
+        return
 
-names = categories.get("names", [])
+    # Crear mapa centrado en Panamá
+    mapa = folium.Map(location=[8.98, -79.52], zoom_start=10)
 
-# ===============================
-# IMAGE UPLOAD SECTION
-# ===============================
-st.header("Clasificación mediante carga de imagen")
+    # Agregar marcadores para cada registro
+    for _, row in df_filtrado.iterrows():
+        try:
+            lat, lon = map(float, row['coordenadas'].split(','))
+            popup_text = f"""
+            <b>Sector:</b> {row['sector']}<br>
+            <b>Tipo:</b> {row['class']}<br>
+            <b>Peso:</b> {row.get('peso_total_foto_kg', 'N/A')} kg<br>
+            <b>Fecha:</b> {row['timestamp'][:10]}
+            """
 
-col1, col2 = st.columns([1,1])
+            # Color según tipo de residuo
+            color_map = {
+                'PLASTIC': 'blue',
+                'METAL': 'gray',
+                'PAPER': 'green',
+                'GLASS': 'lightblue',
+                'BIODEGRADABLE': 'orange',
+                'CARDBOARD': 'brown'
+            }
+            color = color_map.get(row['class'], 'red')
 
-with col1:
-    uploaded = st.file_uploader(
-        "Sube una imagen de un desecho",
-        type=["jpg", "jpeg", "png"]
-    )
+            folium.CircleMarker(
+                location=[lat, lon],
+                radius=8,
+                popup=popup_text,
+                color=color,
+                fill=True,
+                fill_color=color,
+                fill_opacity=0.7
+            ).add_to(mapa)
+        except:
+            continue
 
-    if uploaded is not None:
-        img = Image.open(uploaded).convert("RGB")
-        st.image(img, caption="Imagen cargada", use_column_width=True)
+    st_folium(mapa, width=700, height=500)
 
-        # inferencia
-        results = model(np.array(img))[0]
-        cls_id = int(results.probs.top1)
-        conf = float(results.probs.top1conf)
+# Navegación principal
+st.sidebar.title("Gestion de Residuos")
+pagina = st.sidebar.radio(
+    "Selecciona una sección:",
+    ["Registro de Residuos", "Dashboard Analítico", "Centro Educativo"]
+)
 
-        class_name = model.names[cls_id]
+if pagina == "Registro de Residuos":
+    # Header mejorado
+    st.markdown("""
+    <div class="main-header">
+        <h1>Sistema de Gestión de Residuos</h1>
+    </div>
+    """, unsafe_allow_html=True)
 
-        st.subheader(f"Predicción: {class_name} ({conf*100:.2f}%)")
+    st.markdown("---")
+    st.header("Registro de Residuos")
 
-        # guardar registro
-        append_record(
-            RECORDS_CSV,
-            "upload",
-            getattr(uploaded, "name", "uploaded_image"),
-            class_name,
-            conf
+    # Controles mejorados
+    col_inputs, col_upload = st.columns([1, 1])
+
+    with col_inputs:
+        st.subheader("Información del Sitio")
+
+        # Ubicación automática
+        if st.button("Obtener Ubicación Actual"):
+            ubicacion_actual = obtener_ubicacion_actual()
+            st.session_state.ubicacion_actual = ubicacion_actual
+            st.success(f"Ubicación obtenida: {ubicacion_actual}")
+
+        entrada_sector = st.text_input(
+            "Sector / Corregimiento:",
+            key='sector_in',
+            value='Ciudad de Panamá',
+            help="Ingresa el sector o corregimiento donde se encuentra el residuo"
         )
 
-
-with col2:
-    st.header("Clasificación mediante webcam")
-    camera_image = st.camera_input("Toma una fotografía")
-
-    if camera_image is not None:
-        img = Image.open(camera_image).convert("RGB")
-        st.image(img, caption="Imagen capturada", use_column_width=True)
-
-        results = model(np.array(img))[0]
-        cls_id = int(results.probs.top1)
-        conf = float(results.probs.top1conf)
-        class_name = model.names[cls_id]
-
-        st.subheader(f"Predicción: {class_name} ({conf*100:.2f}%)")
-
-        append_record(
-            RECORDS_CSV,
-            "webcam",
-            "webcam_capture",
-            class_name,
-            conf
+        entrada_coordenadas = st.text_input(
+            "Coordenadas GPS (Lat, Long):",
+            key='gps_in',
+            value=st.session_state.get('ubicacion_actual', '8.98, -79.52'),
+            help="Formato: latitud, longitud (ej: 8.98, -79.52)"
         )
 
-
-# ===============================
-# RECORDS AND STATISTICS
-# ===============================
-st.markdown("---")
-st.header("Historial y estadísticas de clasificación")
-
-df = pd.read_csv(RECORDS_CSV)
-
-st.subheader("Registros recientes")
-st.dataframe(df.tail(50), use_container_width=True)
-
-import altair as alt
-
-st.subheader("Cantidad total por categoría")
-
-if not df.empty:
-    counts = df["class"].value_counts().reset_index()
-    counts.columns = ["class", "count"]
-
-    # Altair chart
-    chart = (
-        alt.Chart(counts)
-        .mark_bar(
-            cornerRadiusTopLeft=6,
-            cornerRadiusTopRight=6,
-            opacity=0.85
+        # Tipo de reporte
+        tipo_reporte = st.selectbox(
+            "Tipo de Reporte:",
+            ["Limpieza Urbana", "Punto Crítico", "Recolección Programada", "Otro"],
+            help="Selecciona el tipo de situación que estás reportando"
         )
-        .encode(
-            x=alt.X("class:N", title="Categoría", sort="-y"),
-            y=alt.Y("count:Q", title="Cantidad"),
-            color=alt.Color(
-                "class:N",
-                scale=alt.Scale(
-                    scheme="set2"   # paleta elegante y suave
-                ),
-                legend=None
-            ),
-            tooltip=[
-                alt.Tooltip("class:N", title="Categoría"),
-                alt.Tooltip("count:Q", title="Cantidad")
-            ]
+
+    with col_upload:
+        st.subheader("Captura de Imagen")
+
+        # Opciones de captura
+        metodo_captura = st.radio(
+            "Método de captura:",
+            ["Subir archivo", "Usar cámara"],
+            horizontal=True
         )
-        .properties(
-            width="container",
-            height=400,
-            title=""
+
+        if metodo_captura == "Subir archivo":
+            uploaded = st.file_uploader(
+                "Selecciona una imagen del residuo",
+                type=["jpg", "jpeg", "png"],
+                help="Sube una foto clara del área con residuos"
+            )
+            img = Image.open(uploaded).convert("RGB") if uploaded else None
+        else:
+            camera_image = st.camera_input("Captura con la cámara del dispositivo")
+            img = Image.open(camera_image).convert("RGB") if camera_image else None
+
+        # Barra lateral para configuración de detección
+        st.sidebar.header("Configuración de Detección")
+        umbral_confianza = st.sidebar.slider(
+            "Umbral de Confianza Mínima:",
+            0.0, 1.0, 0.5, 0.05,
+            key='conf_threshold',
+            help="Solo se registrarán residuos detectados con certeza superior a este valor"
         )
-        .configure_title(
-            fontSize=20,
-            anchor="start"
+        modelo_ia = st.sidebar.selectbox(
+            "Modelo de IA preferido:",
+            ["YOLOv8 + Gemini", "Solo YOLOv8"],
+            key="modelo_ia",
+            help="Elige si usar análisis avanzado con Gemini o solo detección con YOLO"
         )
-        .configure_axis(
-            labelFontSize=13,
-            titleFontSize=14
-        )
-        .configure_view(strokeWidth=0)
-    )
 
-    st.altair_chart(chart, use_container_width=True)
-else:
-    st.info("Aún no hay registros suficientes para generar la gráfica.")
+        # Procesar imagen si está disponible
+        if img is not None:
+            imagen_mostrar = img
+            procesada = False
+
+            if st.button("Analizar Residuos", type="primary", use_container_width=True):
+                with st.spinner("Analizando imagen con IA..."):
+                    try:
+                        fuente = "upload" if metodo_captura == "Subir archivo" else "webcam"
+                        nombre_archivo = getattr(uploaded, "name", "captura_camara") if metodo_captura == "Subir archivo" else "captura_webcam"
+
+                        usar_gemini = modelo_ia == "YOLOv8 + Gemini"
+                        resultado = ejecutar_deteccion_analisis_gemini(
+                            img, fuente, nombre_archivo,
+                            entrada_sector, entrada_coordenadas, umbral_confianza, usar_gemini
+                        )
+
+                        if resultado:
+                            total_items = resultado.get('total_items', 0)
+                            st.success(f"✅ Análisis completado exitosamente! Se detectaron {total_items} ítems.")
+
+                            # Mostrar imagen procesada si está disponible
+                            if 'imagen_procesada' in resultado:
+                                imagen_mostrar = resultado['imagen_procesada']
+                                procesada = True
+
+                            # Mostrar resultados
+                            st.subheader("Resultados del Análisis")
+                            col_res1, col_res2, col_res3 = st.columns(3)
+
+                            with col_res1:
+                                peso_estimado = resultado.get('peso_total', 0)
+                                st.metric("Peso Estimado Total", f"{peso_estimado:.1f} kg")
+                            with col_res2:
+                                impacto_co2 = calcular_impacto_ambiental(pd.DataFrame([resultado]))
+                                st.metric("CO₂ Ahorrado", f"{impacto_co2:.1f} kg")
+                            with col_res3:
+                                st.metric("Confianza Mínima", f"{umbral_confianza*100:.0f}%")
+
+                        else:
+                            st.error("❌ Error: El modelo de detección YOLO no se pudo cargar. Verifica que el archivo 'models/best.pt' exista y sea válido.")
+
+                    except Exception as e:
+                        st.error(f"❌ Error durante el análisis: {str(e)}")
 
 
-# ===============================
-# CATEGORY INFORMATION
-# ===============================
-st.markdown("---")
-st.header("Información sobre las categorías de desechos")
+elif pagina == "Dashboard Analítico":
+    mostrar_dashboard()
 
-for nm in names:
-    info = categories["info"].get(nm, {})
+elif pagina == "Centro Educativo":
+    st.markdown("""
+    <div class="main-header">
+        <h1>Centro Educativo Ambiental</h1>
+    </div>
+    """, unsafe_allow_html=True)
 
-    with st.expander(f"Información sobre {nm}"):
-        st.write("Descripción:", info.get("description", ""))
-        st.write("Cómo desecharlo:", info.get("handling", ""))
-        st.write("¿Es reciclable?:", info.get("recyclable", ""))
+    tab1, tab2, tab3, tab4 = st.tabs(["Guía de Reciclaje", "Centros de Reciclaje", "Horarios de Recolección", "Impacto Ambiental"])
 
-st.markdown("---")
-st.write("Archivo de registros:", str(RECORDS_CSV))
+    with tab1:
+        st.header("Guía de Reciclaje en Panamá")
+
+        categorias_reciclaje = {
+            "Residuos Orgánicos": {
+                "descripcion": "Restos de comida, cáscaras de frutas, vegetales, etc.",
+                "como_reciclar": "Deposítalos en contenedores de compostaje o residuos orgánicos",
+                "beneficio": "Se convierten en abono natural para plantas"
+            },
+            "Cartón y Papel": {
+                "descripcion": "Cajas, periódicos, revistas, papel de oficina",
+                "como_reciclar": "Aplasta las cajas y deposítalas en contenedores azules",
+                "beneficio": "Reduce la tala de árboles"
+            },
+            "Plásticos": {
+                "descripcion": "Botellas PET, envases plásticos, bolsas",
+                "como_reciclar": "Enjuaga y deposita en contenedores amarillos",
+                "beneficio": "Reduce contaminación marina"
+            },
+            "Metales": {
+                "descripcion": "Latas de aluminio, latas de conserva",
+                "como_reciclar": "Aplasta y deposita en contenedores grises",
+                "beneficio": "Ahorra energía en producción"
+            },
+            "Vidrio": {
+                "descripcion": "Botellas y frascos de vidrio",
+                "como_reciclar": "Enjuaga y deposita en contenedores verdes",
+                "beneficio": "El vidrio se puede reciclar infinitamente"
+            }
+        }
+
+        for categoria, info in categorias_reciclaje.items():
+            with st.expander(categoria):
+                st.write(f"**Descripción:** {info['descripcion']}")
+                st.write(f"**Cómo reciclar:** {info['como_reciclar']}")
+                st.write(f"**Beneficio ambiental:** {info['beneficio']}")
+
+    with tab2:
+        st.header("Centros de Reciclaje en Panamá")
+
+        centros = obtener_centros_reciclaje_panama()
+
+        for centro in centros:
+            with st.expander(f"Centro {centro['nombre']}"):
+                st.write(f"**Dirección:** {centro['direccion']}")
+                st.write(f"**Horario:** {centro['horario']}")
+                st.write(f"**Teléfono:** {centro['telefono']}")
+                st.write(f"**Materiales aceptados:** {', '.join(centro['materiales'])}")
+
+                # Botón para ver en mapa
+                if st.button(f"Ver ubicación de {centro['nombre']}", key=f"map_{centro['nombre']}"):
+                    st.components.v1.html(f"""
+                    <iframe src="https://www.google.com/maps/embed/v1/place?key=YOUR_API_KEY&q={centro['direccion'].replace(' ', '+')}" width="100%" height="300" frameborder="0" style="border:0" allowfullscreen></iframe>
+                    """)
+
+    with tab3:
+        st.header("Horarios de Recolección por Sector")
+
+        horarios_panama = {
+            "Ciudad de Panamá": {
+                "Lunes": "Residuos orgánicos y reciclables",
+                "Martes": "Residuos sólidos mixtos",
+                "Miércoles": "Residuos orgánicos y reciclables",
+                "Jueves": "Residuos sólidos mixtos",
+                "Viernes": "Residuos orgánicos y reciclables",
+                "Sábado": "Residuos sólidos mixtos",
+                "Domingo": "Sin recolección"
+            },
+            "San Miguelito": {
+                "Lunes": "Reciclables",
+                "Martes": "Residuos sólidos",
+                "Miércoles": "Reciclables",
+                "Jueves": "Residuos sólidos",
+                "Viernes": "Reciclables",
+                "Sábado": "Residuos sólidos",
+                "Domingo": "Sin recolección"
+            }
+        }
+
+        sector_seleccionado = st.selectbox("Selecciona tu sector:", list(horarios_panama.keys()))
+
+        st.subheader(f"Horarios para {sector_seleccionado}")
+        horario_df = pd.DataFrame(list(horarios_panama[sector_seleccionado].items()), columns=['Día', 'Tipo de Recolección'])
+        st.table(horario_df)
+
+    with tab4:
+        st.header("Calculadora de Impacto Ambiental")
+
+        st.write("Descubre cuánto impacto ambiental generas y cómo puedes reducirlo:")
+
+        col_calc1, col_calc2 = st.columns(2)
+
+        with col_calc1:
+            residuos_semanales = st.slider("Kg de residuos generados por semana:", 1, 50, 10)
+            porcentaje_reciclable = st.slider("% de residuos reciclables:", 0, 100, 30)
+
+        with col_calc2:
+            # Cálculos de impacto
+            co2_anual = residuos_semanales * 52 * 0.5  # kg CO2 por kg de residuos
+            arboles_salvados = (residuos_semanales * porcentaje_reciclable / 100) * 52 / 10  # árboles salvados por año
+            agua_ahorrada = residuos_semanales * 52 * 100  # litros de agua
+
+            st.metric("CO₂ evitado al reciclar (kg/año)", f"{co2_anual:.1f}")
+            st.metric("Árboles salvados por reciclaje", f"{arboles_salvados:.1f}")
+            st.metric("Agua ahorrada (litros/año)", f"{agua_ahorrada:,}")
